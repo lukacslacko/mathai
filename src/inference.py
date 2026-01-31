@@ -53,3 +53,80 @@ class UniversalGeneralization:
         })
         self.storage.mark_proven(quantified, provenance)
         return quantified
+
+class Substitution:
+    """
+    Substitution inference rule: If expression E is proven, then E[S] is also proven
+    for any substitution S (mapping of variables to expressions).
+    """
+    def __init__(self, storage: SentenceStorage):
+        self.storage = storage
+    
+    def _substitute(self, node, bindings):
+        """Recursively apply substitutions to a node."""
+        from syntax import (
+            Node, NumericVariable, LogicVariable, Zero, Successor,
+            Add, Multiply, Equals, Not, Implies, Forall
+        )
+        
+        # If node is a variable, replace it if there's a binding
+        if isinstance(node, (NumericVariable, LogicVariable)):
+            if node.name in bindings:
+                return bindings[node.name]
+            return node
+        
+        # Recursively substitute in compound expressions
+        if isinstance(node, Zero):
+            return node
+        elif isinstance(node, Successor):
+            return self.storage.intern(Successor(self._substitute(node.operand, bindings)))
+        elif isinstance(node, Add):
+            return self.storage.intern(Add(
+                self._substitute(node.left, bindings),
+                self._substitute(node.right, bindings)
+            ))
+        elif isinstance(node, Multiply):
+            return self.storage.intern(Multiply(
+                self._substitute(node.left, bindings),
+                self._substitute(node.right, bindings)
+            ))
+        elif isinstance(node, Equals):
+            return self.storage.intern(Equals(
+                self._substitute(node.left, bindings),
+                self._substitute(node.right, bindings)
+            ))
+        elif isinstance(node, Not):
+            return self.storage.intern(Not(self._substitute(node.operand, bindings)))
+        elif isinstance(node, Implies):
+            return self.storage.intern(Implies(
+                self._substitute(node.left, bindings),
+                self._substitute(node.right, bindings)
+            ))
+        elif isinstance(node, Forall):
+            # Don't substitute the bound variable
+            return self.storage.intern(Forall(
+                node.var,
+                self._substitute(node.sentence, bindings)
+            ))
+        else:
+            return node
+    
+    def apply(self, expression, bindings):
+        """
+        If expression is proven, return expression with bindings applied.
+        bindings: dict mapping variable names (str) to Node objects
+        """
+        expression = self.storage.intern(expression)
+        
+        if not self.storage.is_proven(expression):
+            raise ValueError(f"Expression {expression} is not proven.")
+        
+        # Apply substitution
+        substituted = self._substitute(expression, bindings)
+        
+        # Mark as proven
+        provenance = Provenance("Substitution", dependencies=[expression], metadata={
+            "bindings": {k: str(v) for k, v in bindings.items()}
+        })
+        self.storage.mark_proven(substituted, provenance)
+        return substituted

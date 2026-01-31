@@ -7,7 +7,7 @@ from syntax import (
 )
 from storage import SentenceStorage, Provenance
 from matcher import Matcher
-from inference import ModusPonens, UniversalGeneralization
+from inference import ModusPonens, UniversalGeneralization, Substitution
 from parser import Parser
 
 class AutoProver:
@@ -21,6 +21,7 @@ class AutoProver:
         self.matcher = Matcher()
         self.mp = ModusPonens(storage)
         self.ug = UniversalGeneralization(storage)
+        self.subst = Substitution(storage)
         self.parser = Parser(storage)
         self.guesses: List[Node] = []
         self.history: Set[Node] = set()
@@ -157,14 +158,14 @@ class AutoProver:
                                 pass
 
 
-            # C. Forward Strategy: Proven matching Antecedent (skip if backward-only mode)
+
+            # C. Forward Strategy: Pattern matching and substitution (skip if backward-only mode)
             if enable_forward:
                 proven_facts = list(self.storage.proven.keys())
                 proven_implications = [p for p in proven_facts if isinstance(p, Implies)]
                 
                 iteration_count = 0
                 for imp in proven_implications:
-                    lhs = imp.left
                     for fact in proven_facts:
                         # Periodic timeout check (every 100 iterations to reduce overhead)
                         iteration_count += 1
@@ -175,35 +176,26 @@ class AutoProver:
                                 print(f"Stopped after {iteration_count} forward reasoning iterations")
                                 return False
                         
-                        # print(f"DEBUG: Fwd matching {lhs} vs {fact}")
-                        bindings = self.matcher.match(lhs, fact)
+                        # Try to match the implication's antecedent against the fact
+                        # If imp is P->Q and fact is R, check if there's a substitution S such that P[S] = R
+                        bindings = self.matcher.match(imp.left, fact)
                         if bindings is not None:
                             try:
-                                instantiated_imp = self._instantiate(imp, bindings)
+                                # Apply substitution to the entire implication to get P[S]->Q[S]
+                                substituted_imp = self.subst.apply(imp, bindings)
                                 
-                                # Mark instantiated implication as proven if schema
-                                if bindings:
-                                    parent_prov = self.storage.get_provenance(imp)
-                                    if hasattr(parent_prov, 'method') and ("Axiom" in parent_prov.method or "Schema" in parent_prov.method):
-                                        new_prov = Provenance(f"Instance of {parent_prov.method}", dependencies=[imp])
-                                        self.storage.mark_proven(instantiated_imp, new_prov)
-                                
-                                # Apply MP
-                                rhs = instantiated_imp.right
-                                if not self.storage.is_proven(rhs):
-                                    # Ensure implication is proven before using it
-                                    if not self.storage.is_proven(instantiated_imp):
-                                         continue
-                                         
-                                    self.mp.apply(instantiated_imp, fact)
-                                    print(f"  Forward Derived: {rhs} (from {imp} + {fact})")
-                                    if rhs == initial_goal:
+                                # Now apply modus ponens: we have P[S]->Q[S] and P[S] (which is fact)
+                                # The antecedent should match exactly
+                                if substituted_imp.left == fact:
+                                    consequent = self.mp.apply(substituted_imp, fact)
+                                    print(f"  Forward Derived: {consequent} (from {imp} + {fact})")
+                                    if consequent == initial_goal:
                                         print(f"Success! Goal Proven: {initial_goal}")
                                         return True
-
+                                
                             except Exception as e:
-                                 #print(f"Error in forward: {e}")
-                                 pass
+                                # Substitution or MP might fail, just continue
+                                pass
 
             # Sample next_guesses with bias towards simpler expressions
             if len(next_guesses) > self.MAX_NEW_GUESSES_PER_ROUND:
