@@ -19,6 +19,7 @@ if __name__ == "__main__":
         goal = sys.argv[1]
         steps = 20
         enable_forward = True
+        verbose = False
         
         if len(sys.argv) > 2:
             try:
@@ -30,11 +31,16 @@ if __name__ == "__main__":
             # Third argument controls forward reasoning: "false", "0", "no" disable it
             enable_forward = sys.argv[3].lower() not in ['false', '0', 'no', 'backward']
         
+        if len(sys.argv) > 4:
+            # Fourth argument controls verbose output
+            verbose = sys.argv[4].lower() in ['true', '1', 'yes', 'verbose']
+        
         storage = SentenceStorage.load(DB_PATH)
         prover = AutoProver(storage)
-        prover.prove(goal, max_rounds=steps, enable_forward=enable_forward)
+        prover.prove(goal, max_rounds=steps, enable_forward=enable_forward, verbose=verbose)
         
         storage.save(DB_PATH)
     else:
-        print("Usage: python scripts/prove.py '<goal>' [steps] [enable_forward]")
+        print("Usage: python scripts/prove.py '<goal>' [steps] [enable_forward] [verbose]")
         print("  enable_forward: 'true' (default) or 'false' for backward-only mode")
+        print("  verbose: 'false' (default) or 'true' to print all guesses and derivations")

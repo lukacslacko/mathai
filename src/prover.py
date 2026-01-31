@@ -27,7 +27,7 @@ class AutoProver:
         self.history: Set[Node] = set()
 
 
-    def prove(self, goal_str: str, max_rounds: int = 20, timeout: float = 10.0, enable_forward: bool = True):
+    def prove(self, goal_str: str, max_rounds: int = 20, timeout: float = 10.0, enable_forward: bool = True, verbose: bool = False):
         """
         Attempt to prove the goal with a timeout failsafe.
         
@@ -36,6 +36,7 @@ class AutoProver:
             max_rounds: Maximum number of proof rounds
             timeout: Maximum time in seconds before stopping (default 10)
             enable_forward: Enable forward reasoning (default True). Set to False for backward-only mode.
+            verbose: Print detailed progress information (default False)
         """
         start_time = time.time()
         
@@ -46,8 +47,9 @@ class AutoProver:
             return False
             
         print(f"Goal: {initial_goal}")
-        print(f"Timeout: {timeout} seconds")
-        print(f"Forward reasoning: {'enabled' if enable_forward else 'disabled (backward-only mode)'}")
+        if verbose:
+            print(f"Timeout: {timeout} seconds")
+            print(f"Forward reasoning: {'enabled' if enable_forward else 'disabled (backward-only mode)'}")
         self.guesses = [initial_goal]
         self.history.add(initial_goal)
         
@@ -56,17 +58,20 @@ class AutoProver:
             elapsed = time.time() - start_time
             if elapsed > timeout:
                 print(f"\n⏱️  TIMEOUT after {elapsed:.2f} seconds!")
-                print(f"Stopped at round {round_num + 1} with {len(self.guesses)} guesses")
+                if verbose:
+                    print(f"Stopped at round {round_num + 1} with {len(self.guesses)} guesses")
                 return False
                 
-            print(f"\n--- Round {round_num + 1} ({len(self.guesses)} guesses) ---")
-            print(f"Elapsed: {elapsed:.2f}s")
-            print(f"Guesses: {[str(g) for g in self.guesses]}")
+            if verbose:
+                print(f"\n--- Round {round_num + 1} ({len(self.guesses)} guesses) ---")
+                print(f"Elapsed: {elapsed:.2f}s")
+                print(f"Guesses: {[str(g) for g in self.guesses]}")
 
             # 1. Check if GOAL is proven
             if self.storage.is_proven(initial_goal):
                 print(f"Success! Goal Proven: {initial_goal}")
-                print(f"Provenance: {self.storage.get_provenance(initial_goal)}")
+                if verbose:
+                    print(f"Provenance: {self.storage.get_provenance(initial_goal)}")
                 return True
 
             guesses_to_process = list(self.guesses)
@@ -82,7 +87,8 @@ class AutoProver:
                 
                 # A. Direct Inference Check for g
                 if self._check_inference_rules(g):
-                    print(f"  Proven (Inference): {g}")
+                    if verbose:
+                        print(f"  Proven (Inference): {g}")
                     if g == initial_goal:
                          print(f"Success! Goal Proven: {initial_goal}")
                          return True
@@ -105,7 +111,8 @@ class AutoProver:
                             parent_prov = self.storage.get_provenance(proven)
                             new_prov = Provenance(f"Instance of {parent_prov.method}", dependencies=[proven])
                             self.storage.mark_proven(instantiated, new_prov)
-                            print(f"  Proven (Match): {instantiated}")
+                            if verbose:
+                                print(f"  Proven (Match): {instantiated}")
                             if instantiated == initial_goal:
                                 print(f"Success! Goal Proven: {initial_goal}")
                                 return True
@@ -142,15 +149,18 @@ class AutoProver:
                                     
                                     antecedent = instantiated_imp.left
                                     if antecedent not in self.history:
-                                        print(f"  Guessing {antecedent} (Backward fromImplies {proven})")
+                                        if verbose:
+                                            print(f"  Guessing {antecedent} (Backward fromImplies {proven})")
                                         next_guesses.append(antecedent)
                                         self.history.add(antecedent)
                                         guesses_per_implication[proven] += 1
                                         
                                 elif self.storage.is_proven(proven): 
-                                    if not bindings:
+                                    if not bindings: # This condition seems incorrect, bindings should be used for instantiation
                                         antecedent = proven.left
                                         if antecedent not in self.history:
+                                            if verbose:
+                                                print(f"  Guessing {antecedent} (Backward fromImplies {proven})")
                                             next_guesses.append(antecedent)
                                             self.history.add(antecedent)
                                             guesses_per_implication[proven] += 1
@@ -188,7 +198,8 @@ class AutoProver:
                                 # The antecedent should match exactly
                                 if substituted_imp.left == fact:
                                     consequent = self.mp.apply(substituted_imp, fact)
-                                    print(f"  Forward Derived: {consequent} (from {imp} + {fact})")
+                                    if verbose:
+                                        print(f"  Forward Derived: {consequent} (from {imp} + {fact})")
                                     if consequent == initial_goal:
                                         print(f"Success! Goal Proven: {initial_goal}")
                                         return True
