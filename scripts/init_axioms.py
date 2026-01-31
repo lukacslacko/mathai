@@ -1,6 +1,12 @@
 import sys
 import os
 
+# Fix Unicode encoding for Windows console
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 

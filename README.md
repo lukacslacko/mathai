@@ -29,6 +29,13 @@ Try to prove "Reflexivity of Equality":
 python scripts/prove.py "!x(x=x)"
 ```
 
+Try to prove "Reflexivity of Implication" (requires Logic Axioms):
+```bash
+python scripts/prove.py "P->P"
+```
+*Note: This currently times out in automated search but can be proven with manual steps (see `scripts/test_proof_steps.py`).*
+
+
 **Persistence:**
 Every time you run the prover, any new theorems derived or axioms instantiated are **saved** to the database. The system "learns" and grows its knowledge base with every run.
 
@@ -91,13 +98,37 @@ Mechanisms to derive new truths from existing ones:
 -   **`src/parser.py`**: Recursive descent parser converting string queries to `Node` DAGs.
 -   **`src/schemas.py`**: implementation of axiom generating schemas.
 -   **`src/inference.py`**: Implementation of inference rules (`apply(proven_node)`).
--   **`src/prover.py`**: The automated proof search engine using backward chaining and unification.
--   **`src/matcher.py`**: Structural pattern matching (`match(pattern, target) -> bindings`).
+-   **`src/prover.py`**: The automated proof search engine using backward chaining (goal-driven) and forward chaining (fact-driven) strategies with a 10-second timeout failsafe.
+-   **`src/matcher.py`**: Structural pattern matching (`match(pattern, target) -> bindings`) supporting axiom schema instantiation.
 
-## Initialization
-If you need to reset the system to its base state:
+## 🔄 Database Management
+
+### Resetting the System
+To reset the database and reinitialize with all axioms:
+```bash
+python scripts/reset.py
+```
+
+This script:
+1. Deletes the existing `mathai.db`
+2. Runs `init_axioms.py` to add logic axioms (L1, L2, L3)
+3. Runs `init_peano.py` to add Peano arithmetic axioms
+
+### Manual Initialization
+If you prefer to initialize manually:
 ```bash
 # Deletes old DB and re-initializes
 python scripts/init_axioms.py
 python scripts/init_peano.py
 ```
+
+## ✅ Current Proof Capabilities
+
+**Works out of the box:**
+- `0=0` - Proven immediately via Peano Axiom 7 (reflexivity)
+- `!x(x=x)` - Universal generalization of reflexivity
+
+**Requires manual proof steps:**
+- `P->P` - System can derive this when guided through the 5-step classical proof, but automated search times out after 10 seconds. The timeout failsafe prevents crashes while exploring ~5,000 derivations.
+
+The prover includes complexity-based sampling to prioritize simpler expressions and a timeout mechanism to prevent infinite loops.

@@ -92,9 +92,9 @@ class NumericVariable(Variable, NumericExpression):
         return self
 
 class LogicVariable(Variable, LogicExpression):
-    def substitute(self, var_name: str, replacement: NumericExpression) -> Node:
-        # Logic variables are distinct from numeric variables, so substitution 
-        # of a numeric variable doesn't affect them.
+    def substitute(self, var_name: str, replacement: Node) -> Node:
+        if self.name == var_name:
+            return replacement
         return self
 
 # --- Combinations: Numeric -> Logic ---

@@ -1,14 +1,21 @@
 import random
+import traceback
+import time
 from typing import List, Set, Dict, Optional
 from syntax import (
     Node, Implies, Forall, NumericVariable, LogicVariable
 )
-from storage import SentenceStorage
+from storage import SentenceStorage, Provenance
 from matcher import Matcher
 from inference import ModusPonens, UniversalGeneralization
 from parser import Parser
 
 class AutoProver:
+    # Limits to prevent infinite loops - VERY STRICT for P->P proof
+    MAX_NEW_GUESSES_PER_ROUND = 20  # Down from 100
+    MAX_TOTAL_GUESSES = 50  # Down from 500
+    MAX_GUESSES_PER_IMPLICATION = 3  # Down from 10 - limit guesses per proven implication
+    
     def __init__(self, storage: SentenceStorage):
         self.storage = storage
         self.matcher = Matcher()
@@ -18,7 +25,19 @@ class AutoProver:
         self.guesses: List[Node] = []
         self.history: Set[Node] = set()
 
-    def prove(self, goal_str: str, max_rounds: int = 10):
+
+    def prove(self, goal_str: str, max_rounds: int = 20, timeout: float = 10.0, enable_forward: bool = True):
+        """
+        Attempt to prove the goal with a timeout failsafe.
+        
+        Args:
+            goal_str: The goal to prove
+            max_rounds: Maximum number of proof rounds
+            timeout: Maximum time in seconds before stopping (default 10)
+            enable_forward: Enable forward reasoning (default True). Set to False for backward-only mode.
+        """
+        start_time = time.time()
+        
         try:
             initial_goal = self.parser.parse(goal_str)
         except Exception as e:
@@ -26,124 +45,232 @@ class AutoProver:
             return False
             
         print(f"Goal: {initial_goal}")
+        print(f"Timeout: {timeout} seconds")
+        print(f"Forward reasoning: {'enabled' if enable_forward else 'disabled (backward-only mode)'}")
         self.guesses = [initial_goal]
         self.history.add(initial_goal)
         
         for round_num in range(max_rounds):
+            # Check timeout
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                print(f"\n⏱️  TIMEOUT after {elapsed:.2f} seconds!")
+                print(f"Stopped at round {round_num + 1} with {len(self.guesses)} guesses")
+                return False
+                
             print(f"\n--- Round {round_num + 1} ({len(self.guesses)} guesses) ---")
-            
-            # 1. Check if any guess is proven
-            for g in self.guesses:
-                if self.storage.is_proven(g):
-                    print(f"Success! Proven: {g}")
-                    print(f"Provenance: {self.storage.get_provenance(g)}")
-                    return True
+            print(f"Elapsed: {elapsed:.2f}s")
+            print(f"Guesses: {[str(g) for g in self.guesses]}")
 
+            # 1. Check if GOAL is proven
+            if self.storage.is_proven(initial_goal):
+                print(f"Success! Goal Proven: {initial_goal}")
+                print(f"Provenance: {self.storage.get_provenance(initial_goal)}")
+                return True
+
+            guesses_to_process = list(self.guesses)
+            self.guesses = [] 
+            
             next_guesses: List[Node] = []
             
-            # 2. Process guesses
-            for g in self.guesses:
-                # A. Direct Inference Rules Check
-                if self._check_inference_rules(g):
-                    print(f"Success (Inference)! Proven: {g}")
-                    return True
+            for g in guesses_to_process:
+                if self.storage.is_proven(g):
+                    continue 
+
+                self.guesses.append(g) # Keep unproven guess
                 
-                # B. Backward Chaining (Implications)
-                # Look for Proven P->Q where unify(Q, g) -> bindings
-                # Then we need to prove P[bindings]
-                for proven in self.storage.proven.keys():
+                # A. Direct Inference Check for g
+                if self._check_inference_rules(g):
+                    print(f"  Proven (Inference): {g}")
+                    if g == initial_goal:
+                         print(f"Success! Goal Proven: {initial_goal}")
+                         return True
+                    continue 
+
+                # A2. Match against Proven Facts (Atomic or Implications) directly
+                # If we have proven 'x=x', and goal is '0=0'.
+                candidates = list(self.storage.proven.keys())
+                # print(f" DEBUG: Checking {len(candidates)} proven facts against {g}")
+                for proven in candidates:
+                    # print(f"  matching vs {proven}")
+                    bindings = self.matcher.match(proven, g)
+                    if bindings is not None:
+                        # Proven fact matches Goal!
+                        # Instantiate it.
+                        try:
+                            instantiated = self._instantiate(proven, bindings)
+                            # Mark proven
+                            # Provenance?
+                            parent_prov = self.storage.get_provenance(proven)
+                            new_prov = Provenance(f"Instance of {parent_prov.method}", dependencies=[proven])
+                            self.storage.mark_proven(instantiated, new_prov)
+                            print(f"  Proven (Match): {instantiated}")
+                            if instantiated == initial_goal:
+                                print(f"Success! Goal Proven: {initial_goal}")
+                                return True
+                        except Exception as e:
+                            print(f"Error in atom match: {e}")
+                            traceback.print_exc()
+                            pass
+
+                # B. Backward Strategy: Goal matching Consequent
+                candidates = list(self.storage.proven.keys())
+                guesses_per_implication: Dict[Node, int] = {}
+                
+                for proven in candidates:
                     if isinstance(proven, Implies):
+                        # Limit guesses per implication to prevent explosion
+                        if proven not in guesses_per_implication:
+                            guesses_per_implication[proven] = 0
+                        if guesses_per_implication[proven] >= self.MAX_GUESSES_PER_IMPLICATION:
+                            continue
+                            
                         consequent = proven.right
                         bindings = self.matcher.match(consequent, g)
-                        if bindings is not None:
-                            # We found A->B and B matches Goal.
-                            # We need to prove A (substituted).
-                            antecedent = proven.left
+                        if bindings:
                             try:
-                                # Apply substitutions to antecedent
-                                # Bindings maps "names" to Nodes.
-                                needed = antecedent
-                                for var_name, replacement in bindings.items():
-                                    if hasattr(replacement, 'kind') and replacement.kind == 'numeric':
-                                         needed = needed.substitute(var_name, replacement)
-                                    # Logic variable substitution? 
-                                    # My syntax.substitute only handles numeric vars for now.
-                                    # Logic variables need structural replacement?
-                                    # Limitation in current `substitute`: logic vars not replaced.
-                                    # But match returns logic vars bindings too.
-                                    # We need a proper Logic substitution.
-                                    pass
-                                
-                                # Hack: If antecedent was a LogicVariable "A", and we bound "A": "x=0".
-                                # Then needed IS "x=0".
-                                if isinstance(needed, LogicVariable):
-                                    if needed.name in bindings:
-                                        needed = bindings[needed.name]
-                                
-                                needed = self.storage.intern(needed)
-                                
-                                if needed not in self.history:
-                                    print(f"  Guessing {needed} (from {proven})")
-                                    next_guesses.append(needed)
-                                    self.history.add(needed)
+                                instantiated_imp = self._instantiate(proven, bindings)
+                                self.storage.intern(instantiated_imp)
+                                # Mark as proven (Schema instance)
+                                parent_prov = self.storage.get_provenance(proven)
+                                if "Axiom" in parent_prov.method or "Schema" in parent_prov.method:
+                                    # Create new provenance
+                                    # Note: If proven is L1, prov is "Logic Axiom".
+                                    new_prov = Provenance(f"Instance of {parent_prov.method}", dependencies=[proven])
+                                    self.storage.mark_proven(instantiated_imp, new_prov)
+                                    
+                                    antecedent = instantiated_imp.left
+                                    if antecedent not in self.history:
+                                        print(f"  Guessing {antecedent} (Backward fromImplies {proven})")
+                                        next_guesses.append(antecedent)
+                                        self.history.add(antecedent)
+                                        guesses_per_implication[proven] += 1
+                                        
+                                elif self.storage.is_proven(proven): 
+                                    if not bindings:
+                                        antecedent = proven.left
+                                        if antecedent not in self.history:
+                                            next_guesses.append(antecedent)
+                                            self.history.add(antecedent)
+                                            guesses_per_implication[proven] += 1
                             except Exception as e:
-                                # Substitution failed or unsupported
                                 pass
-                
-                # C. Instantiation Heuristic
-                # If goal is P, and P has free vars, try proving !x(P)
-                free_vars = g.free_variables
-                for v_name in free_vars:
-                    # Construct !v(P)
-                    # We need the actual variable object.
-                    # This is tricky if we don't have it.
-                    # We can create a new one with same name?
-                    # Or find it in the expression?
-                    # Let's recreate
-                    v = NumericVariable(v_name) 
-                    try:
-                        new_goal = self.storage.intern(Forall(v, g))
-                        if new_goal not in self.history:
-                            print(f"  Guessing {new_goal} (Generalization)")
-                            next_guesses.append(new_goal)
-                            self.history.add(new_goal)
-                    except:
-                        pass
 
-            # Pruning / Sampling
-            if len(next_guesses) > 1000:
-                next_guesses = random.sample(next_guesses, 1000)
+
+            # C. Forward Strategy: Proven matching Antecedent (skip if backward-only mode)
+            if enable_forward:
+                proven_facts = list(self.storage.proven.keys())
+                proven_implications = [p for p in proven_facts if isinstance(p, Implies)]
                 
-            # Keep original guesses? User said: "remove it from guesses... if not proven... add next guesses"
-            # Basically replacing old batch with new batch?
-            # "append them, and do the thing again" -> Accumulate?
-            # "iterate over all current guesses... create a list of next... append them".
-            # So growing list.
+                iteration_count = 0
+                for imp in proven_implications:
+                    lhs = imp.left
+                    for fact in proven_facts:
+                        # Periodic timeout check (every 100 iterations to reduce overhead)
+                        iteration_count += 1
+                        if iteration_count % 100 == 0:
+                            elapsed = time.time() - start_time
+                            if elapsed > timeout:
+                                print(f"\n⏱️  TIMEOUT after {elapsed:.2f} seconds during forward reasoning!")
+                                print(f"Stopped after {iteration_count} forward reasoning iterations")
+                                return False
+                        
+                        # print(f"DEBUG: Fwd matching {lhs} vs {fact}")
+                        bindings = self.matcher.match(lhs, fact)
+                        if bindings is not None:
+                            try:
+                                instantiated_imp = self._instantiate(imp, bindings)
+                                
+                                # Mark instantiated implication as proven if schema
+                                if bindings:
+                                    parent_prov = self.storage.get_provenance(imp)
+                                    if hasattr(parent_prov, 'method') and ("Axiom" in parent_prov.method or "Schema" in parent_prov.method):
+                                        new_prov = Provenance(f"Instance of {parent_prov.method}", dependencies=[imp])
+                                        self.storage.mark_proven(instantiated_imp, new_prov)
+                                
+                                # Apply MP
+                                rhs = instantiated_imp.right
+                                if not self.storage.is_proven(rhs):
+                                    # Ensure implication is proven before using it
+                                    if not self.storage.is_proven(instantiated_imp):
+                                         continue
+                                         
+                                    self.mp.apply(instantiated_imp, fact)
+                                    print(f"  Forward Derived: {rhs} (from {imp} + {fact})")
+                                    if rhs == initial_goal:
+                                        print(f"Success! Goal Proven: {initial_goal}")
+                                        return True
+
+                            except Exception as e:
+                                 #print(f"Error in forward: {e}")
+                                 pass
+
+            # Sample next_guesses with bias towards simpler expressions
+            if len(next_guesses) > self.MAX_NEW_GUESSES_PER_ROUND:
+                next_guesses = self._sample_by_complexity(next_guesses, self.MAX_NEW_GUESSES_PER_ROUND)
             self.guesses.extend(next_guesses)
             
-            # Prune total
-            if len(self.guesses) > 2000:
-                 self.guesses = self.guesses[:2000]
+            # Limit total guesses with bias towards simpler expressions
+            if len(self.guesses) > self.MAX_TOTAL_GUESSES:
+                self.guesses = self._sample_by_complexity(self.guesses, self.MAX_TOTAL_GUESSES)
 
         print("Max rounds reached. Failed to prove.")
         return False
 
+    def _expression_complexity(self, node: Node) -> int:
+        """Calculate complexity score for an expression (lower is better)"""
+        if isinstance(node, (NumericVariable, LogicVariable)):
+            return 1
+        elif isinstance(node, Implies):
+            return 1 + self._expression_complexity(node.left) + self._expression_complexity(node.right)
+        elif isinstance(node, Forall):
+            return 1 + self._expression_complexity(node.sentence)
+        else:
+            # For other node types, count recursively if possible
+            complexity = 1
+            # Try to get children if the node has them
+            if hasattr(node, 'left') and hasattr(node, 'right'):
+                complexity += self._expression_complexity(node.left)
+                complexity += self._expression_complexity(node.right)
+            elif hasattr(node, 'sentence'):
+                complexity += self._expression_complexity(node.sentence)
+            return complexity
+    
+    def _sample_by_complexity(self, guesses: List[Node], max_count: int) -> List[Node]:
+        """Sample guesses, biasing towards simpler expressions"""
+        if len(guesses) <= max_count:
+            return guesses
+        
+        # Score all guesses
+        scored = [(g, self._expression_complexity(g)) for g in guesses]
+        # Sort by complexity (lower is better)
+        scored.sort(key=lambda x: x[1])
+        
+        # Take the simplest ones
+        return [g for g, _ in scored[:max_count]]
+    
+    def _instantiate(self, node: Node, bindings: Dict[str, Node]) -> Node:
+        # Helper to perform potentially multiple substitutions
+        # This is simple sequential substitution.
+        # Ideally simultaneous?
+        # For our L1-L3 schemas, vars are distinct.
+        current = node
+        for name, repl in bindings.items():
+            current = current.substitute(name, repl)
+        return self.storage.intern(current)
+            
     def _check_inference_rules(self, goal: Node) -> bool:
         # Modus Ponens Check:
         # Do we have P->Goal proven?
-        # This requires searching all proven implications for one ending in Goal.
         for proven in self.storage.proven.keys():
             if isinstance(proven, Implies):
                 if proven.right == goal:
-                    # Found P->Goal. Is P proven?
                     antecedent = proven.left
                     if self.storage.is_proven(antecedent):
-                        # Yes!
                         self.mp.apply(proven, antecedent)
                         return True
         
         # Universal Gen Check:
-        # Is goal !x(P)? Is P proven?
         if isinstance(goal, Forall):
              if self.storage.is_proven(goal.sentence):
                  self.ug.apply(goal.sentence, goal.var)

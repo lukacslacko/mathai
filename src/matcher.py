@@ -23,28 +23,34 @@ class Matcher:
         return None
 
     def _recursive_match(self, p: Node, t: Node, bindings: Dict[str, Node]) -> bool:
+        # print(f"DEBUG Match: {p} ({type(p).__name__}) vs {t} ({type(t).__name__})")
         # If pattern is a variable, check binding consistency
         if isinstance(p, (NumericVariable, LogicVariable)):
             name = p.name
             if name in bindings:
                 # Must match previous binding
-                return bindings[name] == t # Relies on __eq__ (structural equality)
+                if bindings[name] != t:
+                    # print(f"  Fail: Binding mismatch {name} -> {bindings[name]} vs {t}")
+                    return False
+                return True
             else:
                 # New binding
                 # Constraint: NumericVariable pattern can only match NumericExpression target
                 if isinstance(p, NumericVariable) and not isinstance(t, NumericExpression):
+                    # print(f"  Fail: Type mismatch NumVar vs {type(t)}")
                     return False
+                # LogicVariable can match ANY LogicExpression (including compound formulas)
+                # This enables axiom schema instantiation: A, B, C can be replaced with any formula
                 if isinstance(p, LogicVariable) and not isinstance(t, LogicExpression):
-                    # But LogicVariable might match a LogicExpression? 
-                    # Yes, "P" template matches "A=B".
-                    if not isinstance(t, LogicExpression):
-                         return False
+                    # print(f"  Fail: Type mismatch LogicVar vs {type(t)}")
+                    return False
                 
                 bindings[name] = t
                 return True
 
         # If types differ (and not a variable pattern), fail
         if type(p) != type(t):
+            # print(f"  Fail: Type mismatch {type(p)} != {type(t)}")
             return False
 
         # Structural recursion
@@ -55,27 +61,14 @@ class Matcher:
             return self._recursive_match(p.operand, t.operand, bindings)
 
         if isinstance(p, (Add, Multiply, Equals, Implies)):
-            return (self._recursive_match(p.left, t.left, bindings) and
-                    self._recursive_match(p.right, t.right, bindings))
+            if not self._recursive_match(p.left, t.left, bindings): return False
+            return self._recursive_match(p.right, t.right, bindings)
 
         if isinstance(p, Not):
             return self._recursive_match(p.operand, t.operand, bindings)
 
         if isinstance(p, Forall):
-            # !x(P) matching !y(Q)
-            # This is tricky: Bound variables.
-            # If pattern is !x(P[x]) and target is !y(Q[y]).
-            # We match x to y? Or do we treat x as a placeholder?
-            
-            # Simple approach: Pattern variable `x` must essentially map to `y`.
-            # But `x` is a NumericVariable in the pattern.
-            # If we simply bind "x" -> "y" (NumericVariable), then recurse...
-            
-            # check the var match 
-            if not self._recursive_match(p.var, t.var, bindings):
-                return False
-                
-            # Then body
+            if not self._recursive_match(p.var, t.var, bindings): return False
             return self._recursive_match(p.sentence, t.sentence, bindings)
             
         return False
